@@ -1,4 +1,4 @@
-# 📊 S&P 500 Insider Trades Scraper
+# S&P 500 Insider Trades Scraper
 
 A Python tool that scrapes insider trading transactions for all S&P 500 companies, filtering for trades **≥ $1,000,000**. Built with [yfinance](https://github.com/ranaroussi/yfinance) — **no API key needed**.
 
@@ -119,3 +119,4 @@ This project is for personal/educational use. Insider trading data is sourced fr
 ## Disclaimer
 
 This tool is for **informational and educational purposes only**. It does not constitute financial advice. Always do your own research before making investment decisions. Insider trading data is publicly available through SEC filings.
+
