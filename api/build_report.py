@@ -60,7 +60,7 @@ def main() -> int:
     parser.add_argument(
         "--skip-fetch",
         action="store_true",
-        help="Build from the trade store as-is, without contacting Yahoo Finance",
+        help="Build from the trade store as-is, without refreshing it from SEC EDGAR",
     )
     parser.add_argument(
         "--full",

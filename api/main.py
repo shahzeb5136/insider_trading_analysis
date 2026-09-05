@@ -363,9 +363,10 @@ async def admin_build(key: str, skip_fetch: bool = False, force: bool = False):
     """Force a rebuild now.
 
     ``skip_fetch=true`` rebuilds the PDF from the trade store as it stands,
-    without hitting Yahoo Finance — the fast way to reissue a report after a
-    report-code change, and always safe with respect to the shared request
-    budget.
+    without refreshing it from SEC EDGAR — the fast way to reissue a report
+    after a report-code change. Note it still fetches the chart price series,
+    which is one batched Yahoo request, so it is cheap but not literally
+    network-free.
 
     ``force=true`` overrides the quiet-hours guard. Use it knowing the
     price-data service may be fetching at the same time.
@@ -377,8 +378,9 @@ async def admin_build(key: str, skip_fetch: bool = False, force: bool = False):
             status_code=409,
             detail=(
                 "Inside the quiet window reserved for the price-data service. "
-                "Pass skip_fetch=true to rebuild without touching Yahoo Finance, "
-                "or force=true to override."
+                "Pass skip_fetch=true to rebuild from the stored trades (one "
+                "batched price request rather than a full refresh), or "
+                "force=true to override."
             ),
         )
 

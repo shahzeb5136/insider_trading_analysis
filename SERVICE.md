@@ -106,8 +106,10 @@ The quiet-hours check happens **before** the report row is created. A skip
 path that returned after creating the row would leave it stuck in `building`,
 and the same-day guard would then suppress every retry for the rest of the day.
 
-`POST /api/admin/build?skip_fetch=true` is always safe — it rebuilds the PDF
-from the store without any network fetch at all.
+`POST /api/admin/build?skip_fetch=true` rebuilds the PDF from the store
+without refreshing it from EDGAR. It still fetches the chart price series —
+one batched Yahoo request — so it is cheap against the shared budget but not
+literally network-free.
 
 ## Deploying to Railway
 
@@ -251,9 +253,10 @@ Re-sign links for an owned edition. `403` if the user does not own it.
 | `POST /api/admin/build` | Force a rebuild now |
 
 `POST /api/admin/build?key=…&skip_fetch=true` rebuilds the PDF from the store
-as it stands, without any network fetch. That is the fast way to reissue a
-report after changing report code, and it is always safe with respect to the
-shared Yahoo budget. `force=true` overrides the quiet-hours guard.
+as it stands, without refreshing it from EDGAR. That is the fast way to
+reissue a report after changing report code. It still makes one batched Yahoo
+request for the chart price series. `force=true` overrides the quiet-hours
+guard.
 
 ## Local development
 

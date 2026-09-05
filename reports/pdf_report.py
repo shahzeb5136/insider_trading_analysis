@@ -121,7 +121,7 @@ KPI_L = ParagraphStyle("KpiL", parent=_base["Normal"], fontSize=6.5, leading=8,
 
 DISCLAIMER = (
     "This report is a screening tool built from publicly filed SEC Forms 3, 4 "
-    "and 5 as surfaced by Yahoo Finance. It is not investment advice, not a "
+    "and 5, read directly from EDGAR. It is not investment advice, not a "
     "recommendation to buy or sell any security, and makes no claim to be "
     "complete. Insider purchases are one input among many and are frequently "
     "wrong. Filings are self-reported and can be amended or restated. Verify "
@@ -881,8 +881,18 @@ def _flow_definitions() -> List[Any]:
     terms = [
         ("Open-market purchase",
          "An insider buying shares at the prevailing market price with their own "
-         "money, under no obligation to do so. The only transaction type this "
-         "report treats as a buy signal."),
+         "money, under no obligation to do so — SEC transaction code P. The only "
+         "transaction type this report treats as a buy signal."),
+        ("Transaction code",
+         "The one-letter classification the filer assigns to each trade on the "
+         "Form 4 itself: P purchase, S sale, M or C option exercise, A grant from "
+         "the issuer, D disposition back to the issuer, F shares withheld for tax, "
+         "G gift. Every figure here is grouped on this rather than on wording."),
+        ("Rule 10b5-1 plan",
+         "A trading plan adopted in advance, at a time when the insider held no "
+         "material non-public information. Sales made under one are scheduled "
+         "rather than chosen, so they are reported separately and should not be "
+         "read as a view on the current price."),
         ("Cluster",
          "Two or more distinct insiders at the same company each buying $1M or "
          "more on the same day."),
