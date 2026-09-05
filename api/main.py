@@ -11,6 +11,7 @@ trading_agents and report-suite services spend, keyed by Clerk user ID.
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -93,8 +94,22 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
     return user_id
 
 
-def require_admin(key: str) -> None:
-    if not ADMIN_SECRET_KEY or key != ADMIN_SECRET_KEY:
+def require_admin(key: Optional[str] = None, header_key: Optional[str] = None) -> None:
+    """Authorise an admin call by query parameter or header.
+
+    ``?key=`` is kept because the sibling services use it and the runbooks are
+    written against it, but a secret in a query string ends up in access logs,
+    proxy logs and shell history. ``X-Admin-Key`` is the better channel and is
+    accepted everywhere the query parameter is.
+
+    Compared with ``compare_digest`` so the check does not leak the key's
+    length or prefix through response timing.
+    """
+    if not ADMIN_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    supplied = header_key or key or ""
+    if not secrets.compare_digest(supplied, ADMIN_SECRET_KEY):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -274,13 +289,34 @@ async def purchase(
             user_id, report["id"], REPORT_CREDIT_COST,
         )
 
+    downloads = _downloads_for(report)
+    if not downloads:
+        # The credit is already spent and the purchase is recorded, so the
+        # user does own the report — but handing back 200 with an empty list
+        # would look like a successful purchase of nothing. Fail loudly
+        # instead: the purchase is idempotent, so retrying re-issues the
+        # links without charging again.
+        logger.error(
+            "Report %s has no signable downloads — user %s was charged but got "
+            "no links. R2 credentials or object keys are likely wrong.",
+            report["id"], user_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Your credit was applied and the report is yours, but the "
+                "download links could not be generated. Please retry — you "
+                "will not be charged twice."
+            ),
+        )
+
     return {
         "purchase_id": purchase_row["id"],
         "report": _report_summary(report),
         "charged": charged,
         "credits_spent": REPORT_CREDIT_COST if charged else 0,
         "credits_remaining": database.get_user_credits(user_id),
-        "downloads": _downloads_for(report),
+        "downloads": downloads,
     }
 
 
@@ -322,14 +358,18 @@ async def report_downloads(report_id: str, user_id: str = Depends(get_current_us
 
 
 @app.get("/api/admin/users")
-async def admin_users(key: str):
-    require_admin(key)
+async def admin_users(key: str = "", x_admin_key: Optional[str] = Header(None)):
+    require_admin(key, x_admin_key)
     return {"users": database.get_all_users()}
 
 
 @app.post("/api/admin/credits")
-async def admin_add_credits(body: AdminAddCreditsRequest, key: str):
-    require_admin(key)
+async def admin_add_credits(
+    body: AdminAddCreditsRequest,
+    key: str = "",
+    x_admin_key: Optional[str] = Header(None),
+):
+    require_admin(key, x_admin_key)
     return {
         "user_id": body.user_id,
         "new_balance": database.add_credits(body.user_id, body.amount),
@@ -337,14 +377,16 @@ async def admin_add_credits(body: AdminAddCreditsRequest, key: str):
 
 
 @app.get("/api/admin/reports")
-async def admin_reports(key: str, limit: int = 25):
-    require_admin(key)
+async def admin_reports(
+    key: str = "", limit: int = 25, x_admin_key: Optional[str] = Header(None)
+):
+    require_admin(key, x_admin_key)
     return {"reports": database.list_reports(limit=limit)}
 
 
 @app.get("/api/admin/status")
-async def admin_status(key: str):
-    require_admin(key)
+async def admin_status(key: str = "", x_admin_key: Optional[str] = Header(None)):
+    require_admin(key, x_admin_key)
 
     import store
 
@@ -359,7 +401,12 @@ async def admin_status(key: str):
 
 
 @app.post("/api/admin/build")
-async def admin_build(key: str, skip_fetch: bool = False, force: bool = False):
+async def admin_build(
+    key: str = "",
+    skip_fetch: bool = False,
+    force: bool = False,
+    x_admin_key: Optional[str] = Header(None),
+):
     """Force a rebuild now.
 
     ``skip_fetch=true`` rebuilds the PDF from the trade store as it stands,
@@ -371,7 +418,7 @@ async def admin_build(key: str, skip_fetch: bool = False, force: bool = False):
     ``force=true`` overrides the quiet-hours guard. Use it knowing the
     price-data service may be fetching at the same time.
     """
-    require_admin(key)
+    require_admin(key, x_admin_key)
 
     if not skip_fetch and not force and scheduler.in_quiet_hours():
         raise HTTPException(

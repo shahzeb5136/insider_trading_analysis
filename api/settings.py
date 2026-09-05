@@ -9,6 +9,7 @@ never disagree about where the trade store is.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -88,8 +89,17 @@ ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "")
 
 
 def quiet_hours() -> set[int]:
-    """Parse ``QUIET_HOURS_UTC`` into a set of hours. Empty disables it."""
+    """Parse ``QUIET_HOURS_UTC`` into a set of hours. Empty disables the guard.
+
+    Unparseable entries are logged rather than skipped silently. The failure
+    mode this protects against is quiet: setting the variable to a range like
+    ``21-23`` instead of ``21,22,23`` parses to nothing, which reads as "no
+    quiet hours configured" and removes the whole Yahoo-budget guard without
+    anything appearing to be wrong.
+    """
     hours: set[int] = set()
+    rejected: list[str] = []
+
     for chunk in QUIET_HOURS_UTC.split(","):
         chunk = chunk.strip()
         if not chunk:
@@ -97,9 +107,23 @@ def quiet_hours() -> set[int]:
         try:
             hour = int(chunk)
         except ValueError:
+            rejected.append(chunk)
             continue
         if 0 <= hour <= 23:
             hours.add(hour)
+        else:
+            rejected.append(chunk)
+
+    if rejected:
+        logging.getLogger(__name__).warning(
+            "QUIET_HOURS_UTC=%r contains %s that is not an hour 0-23: %s. "
+            "Expected a comma-separated list, e.g. '21,22,23'.%s",
+            QUIET_HOURS_UTC,
+            "entries" if len(rejected) > 1 else "an entry",
+            ", ".join(rejected),
+            "" if hours else " No quiet hours are in force.",
+        )
+
     return hours
 
 
