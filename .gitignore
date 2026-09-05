@@ -1,0 +1,60 @@
+# ── Generated report artifacts ──────────────────────────────────────────────
+# PDFs and chart PNGs are rebuilt on every run and uploaded to R2.
+*.pdf
+*.docx
+charts/
+cluster_charts/
+reports/charts/
+*.png
+
+# ── Trade data ──────────────────────────────────────────────────────────────
+# The store lives on the Railway volume and is rebuilt from SEC EDGAR — a
+# cold start reloads ~28,000 transactions from the bulk datasets in under a
+# minute, so there is no seed file and nothing here belongs in git.
+*.csv
+*.tsv
+.checkpoint_progress.json
+failed_tickers.txt
+
+# Legacy markdown reports from the pre-service scripts.
+insider_report_*.md
+
+# ── Local service state ─────────────────────────────────────────────────────
+data/*.db
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Secrets ─────────────────────────────────────────────────────────────────
+# Never commit real credentials. .env.example holds placeholders only.
+.env
+.env.*
+!.env.example
+
+# Local notes that hold real values.
+*.local.md
+*.local.txt
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+venv/
+.venv/
+env/
+
+# ── Editor / OS ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Google Drive folder metadata
+desktop.ini
+
+# Local test/scratch data directories.
+data/
+data_*/
+out/

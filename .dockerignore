@@ -1,0 +1,31 @@
+# Generated artifacts — rebuilt on every run.
+charts/
+cluster_charts/
+reports/charts/
+*.pdf
+*.docx
+*.png
+
+# Legacy outputs from the pre-service scripts.
+insider_report_*.md
+insider_report_*.docx
+
+# Local tooling
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.local.md
+
+# Windows / Google Drive cruft
+desktop.ini
+*.bat
+.git/
+.gitignore
