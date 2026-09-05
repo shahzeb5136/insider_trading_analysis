@@ -278,10 +278,17 @@ async def purchase(
             user_id, report["id"], REPORT_CREDIT_COST
         )
     except InsufficientCredits:
-        raise HTTPException(
-            status_code=402,
-            detail="Insufficient credits. Please purchase more credits.",
-        )
+        # A double-click with exactly one credit: the first request takes
+        # the credit, the second finds the balance empty. If the first has
+        # since landed its purchase row, this user *does* own the report
+        # and should get the links, not a 402.
+        existing = database.get_purchase(user_id, report["id"])
+        if not existing:
+            raise HTTPException(
+                status_code=402,
+                detail="Insufficient credits. Please purchase more credits.",
+            )
+        purchase_row, charged = existing, False
 
     if charged:
         logger.info(

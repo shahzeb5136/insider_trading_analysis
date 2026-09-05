@@ -112,44 +112,6 @@ SEC_BACKFILL_QUARTERS = int(os.getenv("SEC_BACKFILL_QUARTERS", "10"))
 SEC_GAP_DAYS_PER_RUN = int(os.getenv("SEC_GAP_DAYS_PER_RUN", "45"))
 
 
-# ── Fetching (price data) ────────────────────────────────────────────────────
-# Yahoo Finance is still used for the report's performance charts — one
-# batched request per build, which is negligible against the shared budget.
-# The settings below also drive the legacy Yahoo trade fetcher, kept as a
-# fallback path.
-
-# Worker threads issuing Yahoo requests.
-FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "8"))
-
-# Sustained ceiling on outbound requests. Yahoo's unofficial limit is widely
-# reported at ~360/hour for authenticated-feeling traffic and far higher for
-# quoteSummary; 4/s ≈ 240/min is well inside what a single IP sustains, and
-# it is the number to lower first if 429s appear.
-FETCH_RATE_PER_SECOND = float(os.getenv("FETCH_RATE_PER_SECOND", "4.0"))
-
-# Burst allowance for the token bucket — lets a run start at full speed
-# instead of ramping, without raising the sustained rate.
-FETCH_BURST = int(os.getenv("FETCH_BURST", "8"))
-
-# Retries per ticker on a 429 or a transport error.
-FETCH_MAX_RETRIES = int(os.getenv("FETCH_MAX_RETRIES", "4"))
-
-# On a 429 every worker backs off together for this long, because a rate
-# limit is a property of the IP and not of the ticket that happened to hit
-# it. Retrying just the one request would keep the other seven workers
-# hammering straight through the penalty box.
-FETCH_COOLDOWN_SECONDS = float(os.getenv("FETCH_COOLDOWN_SECONDS", "20.0"))
-
-# A ticker that has not filed anything in this long is checked less often.
-# Most of the S&P 500 files nothing above $1M in any given week, and those
-# names are the bulk of the request budget.
-STALE_TICKER_DAYS = int(os.getenv("STALE_TICKER_DAYS", "45"))
-
-# ...but never skip a ticker for longer than this, so a name that starts
-# filing again is picked up within days rather than whenever it next trends.
-MAX_TICKER_SKIP_DAYS = int(os.getenv("MAX_TICKER_SKIP_DAYS", "7"))
-
-
 # ── Charts ───────────────────────────────────────────────────────────────────
 
 # Benchmark every performance chart is drawn against.

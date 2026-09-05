@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +84,32 @@ _state_lock = threading.Lock()
 def _set_state(**kwargs: Any) -> None:
     with _state_lock:
         _state.update(kwargs)
+
+
+# Retry backoff after a failed build: 10 min, 20, 40 … capped at six hours.
+# Reset by the next success. Read by _build_is_due().
+_consecutive_failures = 0
+_next_retry_at = 0.0
+_MAX_BACKOFF_SECONDS = 6 * 3600
+
+
+def _note_failure() -> None:
+    global _consecutive_failures, _next_retry_at
+    _consecutive_failures += 1
+    delay = min(600 * (2 ** (_consecutive_failures - 1)), _MAX_BACKOFF_SECONDS)
+    _next_retry_at = time.monotonic() + delay
+    _set_state(consecutive_failures=_consecutive_failures, retry_in_seconds=delay)
+    logger.warning(
+        "Build failure #%s — next automatic attempt in %s minutes",
+        _consecutive_failures, delay // 60,
+    )
+
+
+def _note_success() -> None:
+    global _consecutive_failures, _next_retry_at
+    _consecutive_failures = 0
+    _next_retry_at = 0.0
+    _set_state(consecutive_failures=0, retry_in_seconds=0)
 
 
 def get_state() -> Dict[str, Any]:
@@ -205,33 +232,42 @@ def run_build(skip_fetch: bool = False, force: bool = False) -> Optional[str]:
 
     Returns the report id, or None if another build is running or the quiet
     window deferred this one.
+    """
+    if not _build_lock.acquire(blocking=False):
+        logger.info("Build already in progress — skipping this trigger")
+        return None
+    try:
+        return _run_holding_lock(skip_fetch, force)
+    finally:
+        _build_lock.release()
+
+
+def _run_holding_lock(skip_fetch: bool, force: bool) -> Optional[str]:
+    """The quiet-hours gate and the build. Caller holds ``_build_lock``.
 
     The quiet-hours check happens *before* the report row is created. A skip
     path that returned after creating the row would leave it stuck in
     ``building``, and ``has_report_for_date`` would then suppress every retry
     for the rest of the day.
     """
-    if not _build_lock.acquire(blocking=False):
-        logger.info("Build already in progress — skipping this trigger")
+    if not skip_fetch and not force and in_quiet_hours():
+        logger.info(
+            "Deferring build: %02d:00 UTC is inside the quiet window %s, when "
+            "the price-data service may be using the shared Yahoo budget",
+            _now().hour, sorted(quiet_hours()),
+        )
+        _deferred_build.set()
+        _set_state(deferred_by_quiet_hours=True)
         return None
 
-    try:
-        if not skip_fetch and not force and in_quiet_hours():
-            logger.info(
-                "Deferring build: %02d:00 UTC is inside the quiet window %s, when "
-                "the price-data service may be using the shared Yahoo budget",
-                _now().hour, sorted(quiet_hours()),
-            )
-            _deferred_build.set()
-            _set_state(deferred_by_quiet_hours=True)
-            return None
-
+    # Only a *fetching* build satisfies a deferred one. A skip_fetch rebuild
+    # during the quiet window must not clear the flag, or the deferred fetch
+    # would be quietly forgotten.
+    if not skip_fetch:
         _deferred_build.clear()
         _set_state(deferred_by_quiet_hours=False)
 
-        return _build_locked(skip_fetch)
-    finally:
-        _build_lock.release()
+    return _build_locked(skip_fetch)
 
 
 def _build_locked(skip_fetch: bool) -> Optional[str]:
@@ -267,6 +303,7 @@ def _build_locked(skip_fetch: bool) -> Optional[str]:
         logger.info("Uploaded %s → %s", manifest["filename"], key)
 
         database.mark_report_ready(report_id, report_keys, manifest)
+        _note_success()
         _set_state(
             building=False,
             last_finished_at=_now().isoformat(),
@@ -282,6 +319,7 @@ def _build_locked(skip_fetch: bool) -> Optional[str]:
     except Exception as exc:
         logger.exception("Report %s failed", report_id)
         database.mark_report_failed(report_id, str(exc))
+        _note_failure()
         _set_state(building=False, last_finished_at=_now().isoformat(), last_error=str(exc))
         return None
 
@@ -305,8 +343,16 @@ def _cleanup_work_dir(out_dir: Path) -> None:
 
 
 def _build_is_due() -> bool:
-    """True when today's report has not been built and the hour has passed."""
+    """True when today's report has not been built and the hour has passed.
+
+    A failed build marks its row ``failed``, which ``has_report_for_date``
+    does not count — so without the backoff below a persistently failing
+    build would be retried on every poll, hitting EDGAR and Yahoo every five
+    minutes for the rest of the day.
+    """
     if _now().hour < BUILD_HOUR_UTC:
+        return False
+    if time.monotonic() < _next_retry_at:
         return False
     return not database.has_report_for_date(_today())
 
@@ -360,13 +406,21 @@ def stop_scheduler() -> None:
 
 
 def trigger_build_async(skip_fetch: bool = False, force: bool = False) -> bool:
-    """Kick a build off-thread. False if one is already running."""
-    if _build_lock.locked():
+    """Kick a build off-thread. False if one is already running.
+
+    The lock is taken *here*, before the thread starts, and handed to it.
+    Checking ``locked()`` and then acquiring inside the thread left a window
+    in which two admin calls could both be told "started" while only one
+    build ran; holding the lock from the moment of the answer closes it.
+    """
+    if not _build_lock.acquire(blocking=False):
         return False
-    threading.Thread(
-        target=run_build,
-        kwargs={"skip_fetch": skip_fetch, "force": force},
-        daemon=True,
-        name="manual-build",
-    ).start()
+
+    def _target() -> None:
+        try:
+            _run_holding_lock(skip_fetch, force)
+        finally:
+            _build_lock.release()
+
+    threading.Thread(target=_target, daemon=True, name="manual-build").start()
     return True

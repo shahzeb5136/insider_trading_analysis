@@ -12,7 +12,6 @@ The current pipeline reads SEC EDGAR directly, classifies trades by the
 filer's own transaction code rather than by grepping prose, and renders a
 reportlab PDF in the same house style as the other NexGen reports.
 
-`fetcher.py` at the repo root still contains a Yahoo trade fetcher. That one
-is live: it owns the token bucket and the S&P 500 constituent lookup that
-`sec_fetcher` imports, and Yahoo remains the source for the report's chart
-price series.
+The token bucket and the S&P 500 constituent lookup those scripts needed now
+live in `ratelimit.py` and `universe.py` at the repo root. Yahoo remains the
+source for the report's chart price series only.

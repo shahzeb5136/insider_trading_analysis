@@ -185,7 +185,13 @@ def _is_open_market_purchase(frame: pd.DataFrame) -> pd.Series:
 
     by_text = frame["trade_type"].isin(BUY_TYPES) & keyword_hit
 
-    return by_code | (needs_fallback & by_text)
+    # Materialised as a plain bool. ``code == "P"`` on a nullable string
+    # column yields pd.NA where the code is missing, and under three-valued
+    # logic that NA survives the ``|`` — so the mask came back nullable and
+    # ``astype(int)`` downstream raised on the very rows this fallback exists
+    # for. A missing code that also fails the text test is simply "not a
+    # purchase".
+    return (by_code | (needs_fallback & by_text)).fillna(False).astype(bool)
 
 
 def _is_scheduled(frame: pd.DataFrame) -> pd.Series:

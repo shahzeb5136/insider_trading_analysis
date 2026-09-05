@@ -62,6 +62,15 @@ lists ~2,000 Form 4s a day across the whole market, of which ~120 are ours. A
 `seen_filings` table means the week-long overlap that catches late and amended
 filings does not re-download anything.
 
+Issuers are matched on **CIK**, never on the ticker string. A dual-class
+company is one CIK with two tickers (Alphabet is GOOG and GOOGL), and every one
+of its filings names whichever class traded; matching on the string dropped all
+53 Alphabet filings — $422M — in one quarter. Each row's identity is the
+filing's accession number plus the line's content plus its occurrence index
+among identical lines, so the same trade arriving from the bulk TSV (prices to
+2 decimals) and the Form 4 XML (prices to 4) is stored once, and two identical
+$2M lots in one filing are stored twice.
+
 Requests follow SEC's published policy: a declared User-Agent carrying a real
 contact address, and no more than 10 per second. This runs at 8.
 
@@ -111,13 +120,13 @@ switching to EDGAR removed the need for it entirely.
 | `reports/charts.py` | Batched price download, cached parallel chart rendering |
 | `reports/pdf_report.py` | The reportlab briefing |
 | `reports/builder.py` | Ties analysis → prices → charts → PDF together |
+| `universe.py` | The covered universe: current S&P 500 constituents, with fallbacks |
+| `ratelimit.py` | The token bucket every fetch run shares |
 | `api/` | FastAPI service — see [SERVICE.md](SERVICE.md) |
-| `fetcher.py` | Legacy Yahoo trade fetcher, and the token bucket the SEC path reuses |
+| `legacy/` | The superseded Yahoo-era scripts, kept for reference only |
 
-`fetcher.py` still holds the Yahoo path. It is no longer used for trades, but
-it owns the `TokenBucket` and the S&P 500 constituent lookup that
-`sec_fetcher` imports, and Yahoo is still the source for the charts' price
-series — one batched request per build.
+Yahoo Finance survives in exactly one place: the charts' price series, one
+batched request per build. Trade data never touches it.
 
 ---
 

@@ -223,12 +223,15 @@ get a `409` instead of silently selling a different edition.
 
 **Charging is idempotent per (user, report).** Calling it again for an edition
 the user already owns returns `charged: false`, `credits_spent: 0`, and fresh
-links. A double-click, a retry, or a refresh cannot double-charge.
+links. A double-click, a retry, or a refresh cannot double-charge — including
+the case where a second click lands after the first has emptied a one-credit
+balance: it finds the purchase the first click recorded and returns the links.
 
 | Status | Meaning |
 |---|---|
 | `402` | Insufficient credits — send them to the top-up flow |
 | `409` | No report ready yet, or the pinned `report_id` is stale |
+| `503` | The credit was applied but the download links could not be signed (R2 misconfigured). The user owns the report; retrying re-issues links without charging |
 
 ### `GET /api/insider/purchases`
 
@@ -242,7 +245,15 @@ Re-sign links for an owned edition. `403` if the user does not own it.
 
 `{ "credits": 18 }` — the shared balance, the same number the other services show.
 
-### Admin — `?key=<ADMIN_SECRET_KEY>`
+### Admin — `X-Admin-Key: <ADMIN_SECRET_KEY>`
+
+Send the key as the `X-Admin-Key` header. `?key=` is also accepted, because
+the sibling services use it, but a secret in a query string lands in access
+logs, proxy logs and shell history — the header does not.
+
+```bash
+curl -H "X-Admin-Key: $ADMIN_SECRET_KEY" https://<service>/api/admin/status
+```
 
 | Endpoint | Purpose |
 |---|---|
@@ -288,6 +299,15 @@ python main.py report --out ./out.pdf
   `get_latest_ready_report()` only ever returns `ready` rows, so a bad morning
   degrades to a stale briefing rather than an outage. Watch
   `GET /api/admin/status` for `last_error`.
+- **Failed builds back off.** Automatic retries wait 10 minutes after the
+  first failure, doubling each time to a six-hour ceiling, so a persistently
+  broken build does not hit EDGAR and Yahoo every five-minute poll all day.
+  `POST /api/admin/build` ignores the backoff. `consecutive_failures` and
+  `retry_in_seconds` are in the status payload.
+- **A day whose index could not be fetched is not marked done.** The gap fill
+  records progress per trading day, and only for days it actually read. A
+  timeout or a 5xx leaves the day pending for the next run; only a 404 — the
+  market was closed — counts as "nothing filed".
 - **Interrupted builds self-heal.** A report left `building` by a redeploy is
   marked failed on next boot, so the same-day guard cannot wedge.
 - **Credit refunds.** Credits live in Postgres and purchases in SQLite, so the

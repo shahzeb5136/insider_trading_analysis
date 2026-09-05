@@ -3,13 +3,12 @@
 SQLite on the Railway volume, replacing the CSV the original scripts appended
 to. Three reasons the file format changed:
 
-* **Dedup needs a key.** Both sources re-deliver rows that are already stored:
-  the daily SEC index overlaps a week so late filings are caught, and the
-  legacy Yahoo endpoint returned a ticker's whole recent history on every
-  call. The CSV version deduped with ``drop_duplicates()`` over the entire
-  frame, which is O(n) work on every checkpoint and silently wrong the moment
-  one field is reformatted upstream. Here each row carries a deterministic
-  key and re-inserting it is a no-op.
+* **Dedup needs a key.** The daily SEC index scan deliberately overlaps a
+  week so late and amended filings are caught, which means most of what a
+  run sees is already stored. The CSV version deduped with
+  ``drop_duplicates()`` over the entire frame — O(n) on every checkpoint and
+  silently wrong the moment one field is reformatted upstream. Here each row
+  carries a deterministic key and re-inserting it is a no-op.
 * **Reads are predicated.** The report wants "purchases in the last 10 days"
   and "clusters since 2025", not the whole file. An index answers those; a
   CSV parse does not.
@@ -36,17 +35,11 @@ from config import TRADES_DB_PATH, ensure_dirs
 
 logger = logging.getLogger(__name__)
 
-# Columns as they arrive from yfinance's ``insider_transactions``.
-_YF_COLUMNS = (
-    "Start Date",
-    "Insider",
-    "Position",
-    "Transaction",
-    "Text",
-    "Shares",
-    "Value",
-    "Ownership",
-)
+TRADE_COLUMNS = [
+    "trade_key", "ticker", "insider", "position", "trade_date", "trade_type",
+    "text", "transaction_desc", "shares", "price", "value", "abs_value",
+    "ownership", "trans_code", "is_plan", "source", "first_seen",
+]
 
 
 def _now() -> str:
@@ -89,8 +82,8 @@ def init_db(path: Path | None = None) -> None:
                 abs_value   REAL,
                 ownership   TEXT,
                 -- SEC transaction code (P, S, M, A, F, G …). The filer's own
-                -- classification, which is why the report no longer has to
-                -- infer "is this a purchase?" from prose.
+                -- classification, which is why the report never has to infer
+                -- "is this a purchase?" from prose.
                 trans_code  TEXT,
                 -- Whether the trade was made under a pre-arranged Rule 10b5-1
                 -- plan. This is the line between a scheduled disposal and a
@@ -108,17 +101,6 @@ def init_db(path: Path | None = None) -> None:
                 ON trades(trade_type, trade_date DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_absvalue
                 ON trades(abs_value DESC);
-
-            -- One row per ticker, tracking how worth-checking it is. This is
-            -- what lets a daily run skip most of the S&P 500: the majority of
-            -- names file nothing above $1M in any given month.
-            CREATE TABLE IF NOT EXISTS ticker_state (
-                ticker            TEXT PRIMARY KEY,
-                last_checked      TEXT,
-                last_trade_date   TEXT,
-                consecutive_empty INTEGER NOT NULL DEFAULT 0,
-                last_error        TEXT
-            );
 
             -- Every SEC filing already downloaded and parsed.
             --
@@ -159,7 +141,7 @@ def init_db(path: Path | None = None) -> None:
 # EXISTS`` does nothing to a table that already exists, so without this a
 # redeploy onto a warm Railway volume would keep the old four-column-shorter
 # ``trades`` table and every insert would fail on the unknown columns.
-_TRADE_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+_TRADE_COLUMN_MIGRATIONS: Tuple[Tuple[str, str], ...] = (
     ("price", "REAL"),
     ("trans_code", "TEXT"),
     ("is_plan", "INTEGER NOT NULL DEFAULT 0"),
@@ -173,7 +155,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     Deliberately additive only: columns are added, never dropped or retyped,
     so rolling back to a previous release cannot lose data. SQLite's
     ``ALTER TABLE ADD COLUMN`` is a metadata-only operation, so this stays
-    fast however large the table is.
+    fast however large the table is. (A ``ticker_state`` table from the
+    Yahoo-era schema may still exist on old volumes; it is simply left alone.)
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
 
@@ -184,51 +167,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
         logger.info("Migrated trades: added column %s", column)
 
 
-# ── Row normalisation ────────────────────────────────────────────────────────
+# ── Identity ─────────────────────────────────────────────────────────────────
 
-def classify_trade(text: Any, transaction: Any = None) -> str:
-    """Bucket a filing into a trade type from its free-text description.
-
-    Reads ``Text`` first and falls back to ``Transaction``. The original
-    scraper classified from ``Transaction`` alone, which yfinance leaves
-    empty for most rows — so every trade came out "Other" and the report
-    generator had to reclassify from scratch. Doing it once, here, means the
-    stored rows are already correct.
-    """
-    blob = f"{text} {transaction or ''}".lower()
-
-    # Order matters: an option exercise often also says "acquisition", and a
-    # sale-to-cover says both "exercise" and "sale". The more specific
-    # compensation mechanics are tested before the generic buy/sell words.
-    if any(kw in blob for kw in ("conversion", "exercise")):
-        return "Exercise/Conversion"
-    if any(kw in blob for kw in ("grant", "award")):
-        return "Grant/Award"
-    if "gift" in blob:
-        return "Gift"
-    if any(kw in blob for kw in ("purchase", "buy")):
-        return "Buy"
-    if any(kw in blob for kw in ("sale", "sell", "disposition")):
-        return "Sell"
-    if "acquisition" in blob:
-        return "Buy"
-    return "Other"
-
-
-def _trade_key(
+def trade_key(
     ticker: str,
     insider: str,
     trade_date: str,
     shares: Any,
     value: Any,
     text: str,
+    accession: str = "",
+    ownership: str = "",
+    occurrence: int = 0,
 ) -> str:
-    """Deterministic identity for a filing.
+    """Deterministic identity for one transaction line of one filing.
 
-    Yahoo exposes no transaction ID, so identity has to come from the fields
-    themselves. Shares and value are rounded before hashing: they arrive as
-    floats and a change in the last decimal place would otherwise duplicate a
-    row that is plainly the same filing.
+    EDGAR exposes no per-transaction ID, so identity is built from the filing
+    (its accession number), the line's content, and the line's occurrence
+    index among identical lines in the same filing. The last part is what
+    keeps two identical $2M lots in one Form 4 from collapsing into one row,
+    without depending on the order the bulk TSV and the XML list them in.
+
+    Shares and value are rounded before hashing: they arrive as floats and a
+    change in the last decimal place would otherwise duplicate a row that is
+    plainly the same filing.
     """
 
     def _num(x: Any) -> str:
@@ -245,74 +207,12 @@ def _trade_key(
             _num(shares),
             _num(value),
             (text or "").strip()[:160].upper(),
+            (accession or "").strip(),
+            (ownership or "").strip().upper()[:1],
+            str(int(occurrence or 0)),
         )
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
-
-
-def _coerce_date(value: Any) -> Optional[str]:
-    """Normalise anything date-shaped to ``YYYY-MM-DD``, or None."""
-    ts = pd.to_datetime(value, errors="coerce")
-    if ts is None or pd.isna(ts):
-        return None
-    return ts.strftime("%Y-%m-%d")
-
-
-def _coerce_number(value: Any) -> Optional[float]:
-    """Parse a possibly comma-formatted number, or None."""
-    if value is None:
-        return None
-    if isinstance(value, (int, float)) and not pd.isna(value):
-        return float(value)
-    cleaned = str(value).replace(",", "").replace("$", "").strip()
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-
-def normalise_rows(ticker: str, frame: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Turn a yfinance ``insider_transactions`` frame into storable rows.
-
-    Rows without a usable date or value are dropped: they cannot be placed on
-    a timeline or ranked, which is everything the report does with them.
-    """
-    if frame is None or frame.empty:
-        return []
-
-    rows: List[Dict[str, Any]] = []
-    seen = datetime.now(timezone.utc).isoformat()
-
-    for record in frame.to_dict("records"):
-        trade_date = _coerce_date(record.get("Start Date"))
-        value = _coerce_number(record.get("Value"))
-        if trade_date is None or value is None:
-            continue
-
-        insider = str(record.get("Insider") or "").strip()
-        text = str(record.get("Text") or "").strip()
-        transaction = str(record.get("Transaction") or "").strip()
-        shares = _coerce_number(record.get("Shares"))
-
-        rows.append(
-            {
-                "trade_key": _trade_key(ticker, insider, trade_date, shares, value, text),
-                "ticker": ticker.strip().upper(),
-                "insider": insider,
-                "position": str(record.get("Position") or "").strip(),
-                "trade_date": trade_date,
-                "trade_type": classify_trade(text, transaction),
-                "text": text,
-                "transaction_desc": transaction,
-                "shares": shares,
-                "value": value,
-                "abs_value": abs(value),
-                "ownership": str(record.get("Ownership") or "").strip(),
-                "first_seen": seen,
-            }
-        )
-
-    return rows
 
 
 # ── Writes ───────────────────────────────────────────────────────────────────
@@ -321,23 +221,14 @@ def upsert_trades(rows: Sequence[Dict[str, Any]], path: Path | None = None) -> i
     """Insert rows, ignoring ones already stored. Returns the number added.
 
     ``INSERT OR IGNORE`` against the primary key is the whole dedup strategy —
-    re-fetching a ticker whose filings have not changed writes nothing and
+    re-fetching a filing whose lines have not changed writes nothing and
     costs one index probe per row.
     """
     if not rows:
         return 0
 
-    # Rows can arrive from either source, and the Yahoo path has no notion of
-    # a transaction code or a 10b5-1 flag. Defaulting here rather than at
-    # every call site means one INSERT statement serves both.
     prepared = [
-        {
-            "price": None,
-            "trans_code": None,
-            "is_plan": 0,
-            "source": "sec",
-            **row,
-        }
+        {"price": None, "trans_code": None, "is_plan": 0, "source": "sec", **row}
         for row in rows
     ]
 
@@ -359,66 +250,6 @@ def upsert_trades(rows: Sequence[Dict[str, Any]], path: Path | None = None) -> i
     return after - before
 
 
-def record_ticker_check(
-    ticker: str,
-    found_rows: int,
-    latest_trade_date: Optional[str],
-    error: Optional[str] = None,
-    path: Path | None = None,
-) -> None:
-    """Update the scheduling state for one ticker after a fetch attempt.
-
-    ``consecutive_empty`` is what the adaptive scheduler reads: a name that
-    has come back empty many times in a row is checked less often, which is
-    where most of the request budget is saved.
-    """
-    with connect(path) as conn:
-        if error:
-            conn.execute(
-                """INSERT INTO ticker_state (ticker, last_checked, last_error)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(ticker) DO UPDATE SET
-                       last_checked = excluded.last_checked,
-                       last_error   = excluded.last_error""",
-                (ticker, _now(), error[:500]),
-            )
-            return
-
-        if found_rows > 0:
-            conn.execute(
-                """INSERT INTO ticker_state
-                       (ticker, last_checked, last_trade_date, consecutive_empty, last_error)
-                   VALUES (?, ?, ?, 0, NULL)
-                   ON CONFLICT(ticker) DO UPDATE SET
-                       last_checked      = excluded.last_checked,
-                       last_trade_date   = MAX(
-                           COALESCE(ticker_state.last_trade_date, ''),
-                           COALESCE(excluded.last_trade_date, '')
-                       ),
-                       consecutive_empty = 0,
-                       last_error        = NULL""",
-                (ticker, _now(), latest_trade_date),
-            )
-        else:
-            conn.execute(
-                """INSERT INTO ticker_state
-                       (ticker, last_checked, consecutive_empty, last_error)
-                   VALUES (?, ?, 1, NULL)
-                   ON CONFLICT(ticker) DO UPDATE SET
-                       last_checked      = excluded.last_checked,
-                       consecutive_empty = ticker_state.consecutive_empty + 1,
-                       last_error        = NULL""",
-                (ticker, _now()),
-            )
-
-
-def get_ticker_state(path: Path | None = None) -> Dict[str, Dict[str, Any]]:
-    """Every ticker's scheduling state, keyed by ticker."""
-    with connect(path) as conn:
-        rows = conn.execute("SELECT * FROM ticker_state").fetchall()
-    return {row["ticker"]: dict(row) for row in rows}
-
-
 # ── SEC filing cache ─────────────────────────────────────────────────────────
 
 def filter_unseen_filings(paths: Sequence[str], path: Path | None = None) -> List[str]:
@@ -427,15 +258,12 @@ def filter_unseen_filings(paths: Sequence[str], path: Path | None = None) -> Lis
         return []
 
     with connect(path) as conn:
-        seen = {
-            row[0]
-            for row in conn.execute("SELECT path FROM seen_filings").fetchall()
-        }
+        seen = {row[0] for row in conn.execute("SELECT path FROM seen_filings").fetchall()}
     return [p for p in paths if p not in seen]
 
 
 def record_filings_seen(
-    entries: Sequence[tuple[str, int]], path: Path | None = None
+    entries: Sequence[Tuple[str, int]], path: Path | None = None
 ) -> None:
     """Mark filings as downloaded. ``entries`` is ``(path, rows_found)``."""
     if not entries:
@@ -448,6 +276,18 @@ def record_filings_seen(
                VALUES (?, ?, ?)""",
             [(p, now, n) for p, n in entries],
         )
+
+
+def prune_seen_filings(keep_days: int = 120, path: Path | None = None) -> int:
+    """Forget filings older than ``keep_days``. Returns the number removed.
+
+    The cache only needs to cover the daily-index scan window. Keeping it
+    unbounded would grow it by ~150 rows a day forever for no benefit.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
+    with connect(path) as conn:
+        cur = conn.execute("DELETE FROM seen_filings WHERE fetched_at < ?", (cutoff,))
+        return cur.rowcount
 
 
 def processed_index_days(path: Path | None = None) -> Set[str]:
@@ -477,18 +317,6 @@ def index_coverage(path: Path | None = None) -> Dict[str, Any]:
                FROM index_days"""
         ).fetchone()
     return dict(row)
-
-
-def prune_seen_filings(keep_days: int = 120, path: Path | None = None) -> int:
-    """Forget filings older than ``keep_days``. Returns the number removed.
-
-    The cache only needs to cover the daily-index scan window. Keeping it
-    unbounded would grow it by ~150 rows a day forever for no benefit.
-    """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
-    with connect(path) as conn:
-        cur = conn.execute("DELETE FROM seen_filings WHERE fetched_at < ?", (cutoff,))
-        return cur.rowcount
 
 
 # ── Reads ────────────────────────────────────────────────────────────────────
@@ -525,17 +353,10 @@ def load_trades(
         frame = pd.read_sql_query(sql, conn, params=params)
 
     if frame.empty:
-        frame = pd.DataFrame(
-            columns=[
-                "trade_key", "ticker", "insider", "position", "trade_date",
-                "trade_type", "text", "transaction_desc", "shares", "price",
-                "value", "abs_value", "ownership", "trans_code", "is_plan",
-                "source", "first_seen",
-            ]
-        )
+        frame = pd.DataFrame(columns=TRADE_COLUMNS)
 
     frame["date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-    frame["is_plan"] = frame.get("is_plan", 0).fillna(0).astype(bool)
+    frame["is_plan"] = pd.to_numeric(frame["is_plan"], errors="coerce").fillna(0).astype(bool)
     return frame
 
 
@@ -546,19 +367,17 @@ def stats(path: Path | None = None) -> Dict[str, Any]:
             """SELECT COUNT(*)                AS trades,
                       COUNT(DISTINCT ticker)  AS tickers,
                       MIN(trade_date)         AS first_trade,
-                      MAX(trade_date)         AS last_trade
+                      MAX(trade_date)         AS last_trade,
+                      SUM(is_plan)            AS plan_trades
                FROM trades"""
         ).fetchone()
-        checked = conn.execute(
-            "SELECT COUNT(*) FROM ticker_state WHERE last_checked IS NOT NULL"
-        ).fetchone()[0]
+        filings = conn.execute("SELECT COUNT(*) FROM seen_filings").fetchone()[0]
 
     out = dict(row)
-    out["tickers_checked"] = checked
+    out["plan_trades"] = int(out.get("plan_trades") or 0)
+    out["filings_cached"] = filings
     return out
 
-
-# ── Bootstrap ────────────────────────────────────────────────────────────────
 
 def is_empty(path: Path | None = None) -> bool:
     """True when the store holds no trades at all."""

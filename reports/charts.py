@@ -312,12 +312,20 @@ def build_charts(
                 if path:
                     results[job["key"]] = path
     except Exception:
-        # Process pools can be unavailable in constrained sandboxes. Falling
-        # back keeps the report buildable rather than losing every chart.
+        # Process pools can be unavailable in constrained sandboxes.
         logger.warning("Parallel chart rendering unavailable — falling back to serial")
-        for job in jobs:
-            if job["key"] in results:
-                continue
+
+    # Serial pass over whatever is still missing — unconditionally, not only
+    # when the pool failed to start. A worker dying mid-run raises
+    # BrokenProcessPool from every remaining future, which the per-chart
+    # handler above swallows one at a time; the pool then shuts down cleanly
+    # and, in an earlier version, the fallback never ran and every chart was
+    # silently lost. Rendering the leftovers here covers that case and the
+    # partial-failure one in the same stroke.
+    missing = [job for job in jobs if job["key"] not in results]
+    if missing:
+        logger.info("Rendering %s chart(s) serially", len(missing))
+        for job in missing:
             _, path = _render_one(job)
             if path:
                 results[job["key"]] = path
