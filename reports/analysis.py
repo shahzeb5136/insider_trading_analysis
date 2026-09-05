@@ -629,11 +629,19 @@ def analyse(
     # whole history and their participant tables need the price too.
     frame = frame.copy()
     if "price" in frame.columns:
-        missing = frame["price"].isna()
-        if missing.any():
-            frame.loc[missing, "price"] = frame.loc[missing, "text"].map(parse_price)
+        # Coerced to a nullable float first. Writing the parsed result into a
+        # float64 column with .loc raises under pandas 3 when the parse comes
+        # back all-None ("Invalid value '[None]' for dtype 'float64'") — which
+        # is precisely the mixed case that occurs in practice, where SEC rows
+        # carry a price and an older row does not.
+        parsed = pd.to_numeric(
+            frame["text"].map(parse_price), errors="coerce"
+        ).astype("float64")
+        frame["price"] = pd.to_numeric(frame["price"], errors="coerce").fillna(parsed)
     else:
-        frame["price"] = frame["text"].map(parse_price)
+        frame["price"] = pd.to_numeric(
+            frame["text"].map(parse_price), errors="coerce"
+        ).astype("float64")
 
     window = frame[frame["trade_date"] >= window_start].copy()
 
