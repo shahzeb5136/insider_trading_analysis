@@ -82,8 +82,13 @@ _ARCHIVE_ROOT = "https://www.sec.gov/Archives/"
 _TRANS_CODES: Dict[str, str] = {
     "P": "Buy",                    # Open-market or private purchase
     "S": "Sell",                   # Open-market or private sale
-    "A": "Grant/Award",            # Grant, award or other acquisition from the issuer
-    "D": "Grant/Award",            # Disposition to the issuer
+    "A": "Grant/Award",            # Grant, award or other acquisition FROM the issuer
+    # D is the mirror of A — a disposition back TO the issuer, typically a
+    # buyback or a share surrender. It is a disposal, not compensation, and
+    # bucketing it with grants would show a nine-figure buyback as an award.
+    # It is kept out of "Sell" too: the issuer is the counterparty, so it says
+    # nothing about what the open market would pay.
+    "D": "Disposition to Issuer",
     "F": "Tax Withholding",        # Shares withheld to pay tax or exercise price
     "M": "Exercise/Conversion",    # Exercise or conversion of a derivative
     "C": "Exercise/Conversion",    # Conversion of a derivative security

@@ -206,39 +206,98 @@ def _empty_like(columns: List[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
 
+# Words that must stay upper-case through title-casing. ``str.title()`` would
+# render these "Ceo", "Evp", "Ii" — which reads as a typo rather than a title.
+_ACRONYMS = frozenset(
+    """CEO CFO COO CTO CAO CMO CLO CIO CSO CCO CPO CHRO CRO CDO EVP SVP VP GC
+       IT HR PR US UK EU IP AI ML VC PE REIT LLC LP LLP INC CO NA SA AG GMBH
+       II III IV JR SR""".split()
+)
+
+# Short words that stay lower-case inside a title, unless they lead it.
+_MINOR_WORDS = frozenset("and of the for to at in on a an & or".split())
+
+
+def _title_case(text: str) -> str:
+    """Title-case a shouted string without mangling acronyms or possessives.
+
+    ``str.title()`` alone turns "PRESIDENT AND CEO" into "President And Ceo"
+    and "DD'S DISCOUNTS" into "Dd'S Discounts". Both read as errors.
+    """
+    words = text.split()
+    out: List[str] = []
+
+    for index, word in enumerate(words):
+        stripped = word.strip(",.&()-")
+        if stripped.upper() in _ACRONYMS:
+            out.append(word.upper())
+            continue
+        if index > 0 and stripped.lower() in _MINOR_WORDS:
+            out.append(word.lower())
+            continue
+        # capitalize() rather than title(): title() capitalises after every
+        # apostrophe, which is where "Dd'S" comes from.
+        out.append(word.capitalize())
+
+    return " ".join(out)
+
+
+# Long phrases abbreviated *in place*, longest first so that "Chief Executive
+# Officer" is matched before the bare "Officer" inside it.
+_ROLE_ABBREVIATIONS: tuple[tuple[str, str], ...] = (
+    ("beneficial owner of more than 10% of a class of security", "10% Owner"),
+    ("executive vice president", "EVP"),
+    ("chief executive officer", "CEO"),
+    ("chief financial officer", "CFO"),
+    ("chief operating officer", "COO"),
+    ("chief technology officer", "CTO"),
+    ("chief accounting officer", "CAO"),
+    ("chief marketing officer", "CMO"),
+    ("chief medical officer", "CMO"),
+    ("chief legal officer", "CLO"),
+    ("chief investment officer", "CIO"),
+    ("chief information officer", "CIO"),
+    ("chief scientific officer", "CSO"),
+    ("chief commercial officer", "CCO"),
+    ("chief people officer", "CPO"),
+    ("chief human resources officer", "CHRO"),
+    ("senior vice president", "SVP"),
+    ("vice president", "VP"),
+    ("board of directors", "Board"),
+    (" and ", " & "),
+)
+
+
 def _shorten_role(position: Any) -> str:
     """Compress a filing's job title into something that fits a table cell.
 
-    SEC relation strings run long — "Beneficial Owner of more than 10% of a
-    Class of Security" is 52 characters and appears constantly.
+    Abbreviates in place rather than substituting a label for the whole
+    string. That distinction matters: an earlier version matched substrings
+    and returned a fixed word, so "President, CEO & Director" came back as
+    just "Director" — dropping the part a reader actually cares about — and
+    "President and CEO" came back as the meaningless "Pres. &".
+
+    Filings also arrive in inconsistent case ("PRESIDENT" beside "President"),
+    so anything shouting is title-cased to stop the same job reading as two.
     """
     text = str(position or "").strip()
     if not text:
         return "—"
 
-    lowered = text.lower()
-    replacements = [
-        ("beneficial owner of more than 10% of a class of security", "10% Owner"),
-        ("chief executive officer", "CEO"),
-        ("chief financial officer", "CFO"),
-        ("chief operating officer", "COO"),
-        ("chief technology officer", "CTO"),
-        ("chief accounting officer", "CAO"),
-        ("chief legal officer", "CLO"),
-        ("chief medical officer", "CMO"),
-        ("general counsel", "General Counsel"),
-        ("president and", "Pres. &"),
-        ("executive vice president", "EVP"),
-        ("senior vice president", "SVP"),
-        ("vice president", "VP"),
-        ("director", "Director"),
-        ("officer", "Officer"),
-    ]
-    for needle, short in replacements:
-        if needle in lowered:
-            return short
+    # ALL CAPS is a filing-style artifact, not emphasis.
+    if text.isupper():
+        text = _title_case(text)
 
-    return text if len(text) <= 28 else text[:27] + "…"
+    lowered = text.lower()
+    for needle, short in _ROLE_ABBREVIATIONS:
+        if needle in lowered:
+            # Rebuild case-insensitively while preserving the rest verbatim.
+            index = lowered.index(needle)
+            text = text[:index] + short + text[index + len(needle):]
+            lowered = text.lower()
+
+    text = " ".join(text.split())
+    return text if len(text) <= 30 else text[:29] + "…"
 
 
 _PRICE_RE = re.compile(r"at price\s+([\d,]+\.?\d*)(?:\s*-\s*([\d,]+\.?\d*))?", re.I)
