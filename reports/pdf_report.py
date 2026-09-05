@@ -370,8 +370,11 @@ def _flow_cover(findings: Findings) -> List[Any]:
         story.append(Paragraph("What the window was made of", LABEL_S))
         story.append(_type_mix_table(findings))
 
-    story.append(Paragraph("Method", LABEL_S))
-    story.append(
+    # Kept together: when the type table runs long this block would otherwise
+    # split mid-sentence across the page break, and a cover page that ends
+    # in the middle of a paragraph reads as an accident.
+    method = [Paragraph("Method", LABEL_S)]
+    method.append(
         Paragraph(
             "Built from SEC Forms 3, 4 and 5 read directly from EDGAR, covering "
             "every S&amp;P 500 constituent and every transaction of $1,000,000 or "
@@ -390,6 +393,7 @@ def _flow_cover(findings: Findings) -> List[Any]:
             BODY_S,
         )
     )
+    story.append(KeepTogether(method))
 
     return story
 
