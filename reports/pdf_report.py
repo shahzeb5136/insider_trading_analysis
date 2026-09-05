@@ -114,6 +114,10 @@ SMALL_S = ParagraphStyle("Sm", parent=_base["Normal"], fontSize=7.5, leading=10,
 CELL_S = ParagraphStyle("Cell", parent=_base["Normal"], fontSize=6.8, leading=8.2,
                         textColor=BODY)
 CELL_B = ParagraphStyle("CellB", parent=CELL_S, fontName="Helvetica-Bold")
+# A Paragraph's alignment comes from its style; the table's ALIGN command
+# only positions plain-string cells. Ticker cells are Paragraphs (so they
+# escape safely) and sit in centred columns, hence a centred variant.
+CELL_C = ParagraphStyle("CellC", parent=CELL_B, alignment=TA_CENTER)
 KPI_N = ParagraphStyle("KpiN", parent=_base["Normal"], fontSize=16, leading=19,
                        alignment=TA_CENTER, fontName="Helvetica-Bold", textColor=INK)
 KPI_L = ParagraphStyle("KpiL", parent=_base["Normal"], fontSize=6.5, leading=8,
@@ -355,7 +359,7 @@ def _flow_cover(findings: Findings) -> List[Any]:
     ranked = findings.by_conviction(5)
     if ranked:
         story.append(Paragraph("Strongest conviction signals on record", LABEL_S))
-        story.append(_cluster_league_table(ranked, compact=True))
+        story.append(_cluster_league_table(ranked))
         story.append(
             Paragraph(
                 "Ranked by a composite of participant count, dollar size, direct "
@@ -424,9 +428,9 @@ def _type_mix_table(findings: Findings) -> Table:
                 fmt_money(row["total_value"]),
                 fmt_money(row["avg_value"]),
                 _flat_table(
-                    [[bar_cell(share, 1.75 * inch, colour),
+                    [[bar_cell(share, 1.62 * inch, colour),
                       Paragraph(f" {share:.0%}", CELL_S)]],
-                    [1.79 * inch, 0.50 * inch],
+                    [1.66 * inch, 0.50 * inch],
                 ),
             ]
         )
@@ -436,8 +440,13 @@ def _type_mix_table(findings: Findings) -> Table:
     return table
 
 
-def _cluster_league_table(clusters: Sequence[Cluster], compact: bool = False) -> Table:
-    """Every cluster as one ranked row: who, how much, and what happened next."""
+def _cluster_league_table(clusters: Sequence[Cluster], start: int = 1) -> Table:
+    """Every cluster as one ranked row: who, how much, and what happened next.
+
+    ``start`` is the rank of the first row. The table is drawn twice from one
+    global ranking — the top few on the cover, the remainder under Cluster
+    history — and the second must continue the numbering, not restart it.
+    """
     header = ["#", "Date", "Ticker", "Insiders", "Cluster $", "Since", "S&P 500",
               "Alpha", "Conviction"]
     widths = [0.30 * inch, 0.80 * inch, 0.62 * inch, 0.62 * inch, 0.86 * inch,
@@ -446,13 +455,13 @@ def _cluster_league_table(clusters: Sequence[Cluster], compact: bool = False) ->
     data: List[List[Any]] = [header]
     extra: List[tuple] = [
         ("ALIGN", (0, 0), (3, -1), "CENTER"),
-        ("ALIGN", (4, 1), (7, -1), "RIGHT"),
+        ("ALIGN", (4, 0), (7, -1), "RIGHT"),
     ]
 
     best = max((c.conviction for c in clusters), default=1.0) or 1.0
 
-    for index, cluster in enumerate(clusters, 1):
-        row_no = index  # header occupies row 0, so data rows start at 1
+    for row_no, cluster in enumerate(clusters, 1):  # header occupies row 0
+        index = start + row_no - 1
 
         if cluster.alpha is not None:
             extra.append(
@@ -473,16 +482,16 @@ def _cluster_league_table(clusters: Sequence[Cluster], compact: bool = False) ->
             )
 
         conviction_cell = _flat_table(
-            [[bar_cell(cluster.conviction / best, 1.30 * inch, ACCENT_MID),
+            [[bar_cell(cluster.conviction / best, 1.22 * inch, ACCENT_MID),
               Paragraph(f" {cluster.conviction:.2f}", CELL_S)]],
-            [1.34 * inch, 0.60 * inch],
+            [1.26 * inch, 0.60 * inch],
         )
 
         data.append(
             [
                 str(index),
                 fmt_date(cluster.date),
-                Paragraph(_escape(cluster.ticker), CELL_B),
+                Paragraph(_escape(cluster.ticker), CELL_C),
                 str(cluster.insiders),
                 fmt_money(cluster.total_value),
                 _pct(cluster.since_return),
@@ -536,7 +545,7 @@ def _flow_purchases(findings: Findings) -> List[Any]:
         data.append(
             [
                 fmt_date(row["trade_date"]),
-                _cell(row["ticker"], CELL_B),
+                _cell(row["ticker"], CELL_C),
                 _cell(str(row["insider"]).title()),
                 _cell(_shorten_role(row["position"])),
                 fmt_shares(row["shares"]),
@@ -552,7 +561,7 @@ def _flow_purchases(findings: Findings) -> List[Any]:
             ACCENT,
             extra=[
                 ("ALIGN", (0, 0), (1, -1), "CENTER"),
-                ("ALIGN", (4, 1), (6, -1), "RIGHT"),
+                ("ALIGN", (4, 0), (6, -1), "RIGHT"),
                 ("ALIGN", (7, 0), (7, -1), "CENTER"),
                 ("TEXTCOLOR", (6, 1), (6, -1), BUY),
                 ("FONTNAME", (6, 1), (6, -1), "Helvetica-Bold"),
@@ -637,7 +646,7 @@ def _cluster_block(cluster: Cluster) -> List[Any]:
         table_style(
             ACCENT_MID,
             extra=[
-                ("ALIGN", (2, 1), (4, -1), "RIGHT"),
+                ("ALIGN", (2, 0), (4, -1), "RIGHT"),
                 ("ALIGN", (5, 0), (5, -1), "CENTER"),
                 ("TEXTCOLOR", (4, 1), (4, -1), BUY),
                 ("FONTNAME", (4, 1), (4, -1), "Helvetica-Bold"),
@@ -675,7 +684,7 @@ def _flow_cluster_history(findings: Findings, skip: int = 8) -> List[Any]:
             f"above simply expands the strongest few.",
             BODY_S,
         ),
-        _cluster_league_table(remaining),
+        _cluster_league_table(remaining, start=skip + 1),
     ]
 
 
@@ -694,7 +703,7 @@ def _flow_flows_and_people(findings: Findings) -> List[Any]:
         data: List[List[Any]] = [header]
         extra: List[tuple] = [
             ("ALIGN", (0, 0), (0, -1), "CENTER"),
-            ("ALIGN", (1, 1), (5, -1), "RIGHT"),
+            ("ALIGN", (1, 0), (5, -1), "RIGHT"),
         ]
 
         for index, (_, row) in enumerate(findings.ticker_sentiment.iterrows(), 1):
@@ -702,23 +711,22 @@ def _flow_flows_and_people(findings: Findings) -> List[Any]:
                 label, colour, background = "Net buying", BUY, BUY_BG
             elif row["bought"] > 0:
                 label, colour, background = "Mixed", WARN, BAND
-            else:
+            elif row["sold"] > 0:
                 label, colour, background = "Net selling", SELL, SELL_BG
+            else:
+                # Only exercises, grants or withholding in the window — no
+                # open-market view in either direction. Calling that "net
+                # selling" in red beside a green $0 would be two lies at once.
+                label, colour, background = "No open-market trades", SMALL, white
 
             extra.append(("BACKGROUND", (6, index), (6, index), background))
             extra.append(("TEXTCOLOR", (6, index), (6, index), colour))
-            extra.append(
-                (
-                    "TEXTCOLOR",
-                    (5, index),
-                    (5, index),
-                    BUY if row["net"] >= 0 else SELL,
-                )
-            )
+            net_colour = BUY if row["net"] > 0 else SELL if row["net"] < 0 else SMALL
+            extra.append(("TEXTCOLOR", (5, index), (5, index), net_colour))
 
             data.append(
                 [
-                    _cell(row["ticker"], CELL_B),
+                    _cell(row["ticker"], CELL_C),
                     f"{int(row['buy_trades'])}",
                     fmt_money(row["bought"]) if row["bought"] else "—",
                     f"{int(row['sell_trades'])}",
@@ -751,7 +759,10 @@ def _flow_flows_and_people(findings: Findings) -> List[Any]:
                     _cell(row["ticker"], CELL_B),
                     str(int(row["trades"])),
                     fmt_money(row["total_value"]),
-                    bar_cell(row["total_value"] / biggest if biggest else 0, 1.45 * inch),
+                    # 1.35in inside a 1.50in cell: the cell's 3.5pt padding on
+                    # each side leaves ~1.40in of content box, and a bar drawn
+                    # to the full width would sit on the gridline.
+                    bar_cell(row["total_value"] / biggest if biggest else 0, 1.35 * inch),
                 ]
             )
 
@@ -820,8 +831,7 @@ def _flow_appendix(findings: Findings, sell_floor: float = 5_000_000) -> List[An
     genuinely large disposals — which do carry information — and drops the
     routine ones.
     """
-    window = findings.largest_trades
-    if window is None or window.empty:
+    if findings.purchases.empty and findings.sales.empty:
         return []
 
     purchases = findings.purchases
@@ -846,14 +856,14 @@ def _flow_appendix(findings: Findings, sell_floor: float = 5_000_000) -> List[An
     ]
 
     header = ["Date", "Ticker", "Insider", "Role", "Type", "Shares", "Price", "Value"]
-    widths = [0.70 * inch, 0.52 * inch, 1.70 * inch, 1.46 * inch,
-              0.62 * inch, 0.72 * inch, 0.62 * inch, 0.86 * inch]
+    widths = [0.70 * inch, 0.52 * inch, 1.90 * inch, 1.46 * inch,
+              0.62 * inch, 0.72 * inch, 0.62 * inch, 0.86 * inch]  # = 7.40in
 
     data: List[List[Any]] = [header]
     extra: List[tuple] = [
         ("ALIGN", (0, 0), (1, -1), "CENTER"),
         ("ALIGN", (4, 0), (4, -1), "CENTER"),
-        ("ALIGN", (5, 1), (7, -1), "RIGHT"),
+        ("ALIGN", (5, 0), (7, -1), "RIGHT"),
     ]
 
     for index, (_, row) in enumerate(rows.iterrows(), 1):
@@ -864,7 +874,7 @@ def _flow_appendix(findings: Findings, sell_floor: float = 5_000_000) -> List[An
         data.append(
             [
                 fmt_date(row["trade_date"]),
-                _cell(row["ticker"], CELL_B),
+                _cell(row["ticker"], CELL_C),
                 _cell(str(row["insider"]).title()),
                 _cell(_shorten_role(row["position"])),
                 _cell("Buy" if is_buy else "Sell"),

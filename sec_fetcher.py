@@ -644,6 +644,15 @@ def backfill_from_bulk(
             quarter, len(payload) / 1e6, len(rows), added,
         )
 
+    # Remember the newest quarter that genuinely loaded. The gap fill starts
+    # the day after it — so a quarter that failed to download leaves a gap
+    # the next run will close, rather than a hole nothing ever revisits.
+    if loaded:
+        newest = max(loaded)
+        current = store.get_meta("bulk_through_quarter")
+        if current is None or newest > current:
+            store.set_meta("bulk_through_quarter", newest)
+
     elapsed = time.monotonic() - started
     logger.info(
         "Backfill complete: %s quarter(s) in %.1fs, %s new transactions%s",
@@ -738,16 +747,25 @@ def _parse_form4(
         return []
 
     issuer = root.find("issuer")
-    ticker = _text(issuer, "issuerTradingSymbol").replace(".", "-").upper()
-    ticker = ticker.split()[0] if ticker else ""
-    if not ticker:
-        cik = _pad_cik(_text(issuer, "issuerCik"))
-        ticker = ticker_for_cik.get(cik or "", "")
-    if not ticker:
+
+    # The daily index lists a Form 4 under every CIK involved — the issuer's
+    # and each reporting owner's. A filing can therefore reach this parser
+    # because the *owner* is a covered company (Berkshire as a 10% holder of
+    # something outside the index), so the issuer is checked here, not just
+    # at the index line.
+    issuer_cik = _pad_cik(_text(issuer, "issuerCik"))
+    if not issuer_cik or issuer_cik not in ticker_for_cik:
         return []
+
+    ticker = _text(issuer, "issuerTradingSymbol").replace(".", "-").upper()
+    ticker = ticker.split()[0] if ticker else ticker_for_cik[issuer_cik]
 
     is_plan = _truthy(_text(root, "aff10b5One"))
 
+    # Joint filings list several reporting owners for the same shares — a
+    # trust and its trustee, spouses. The first is taken, on both ingestion
+    # paths. Attributing one purchase to each of them would count it twice
+    # and manufacture a "cluster" out of a single decision.
     owner = root.find("reportingOwner")
     insider = _text(owner, "reportingOwnerId", "rptOwnerName") or "Unknown"
     relationship = owner.find("reportingOwnerRelationship") if owner is not None else None
@@ -994,8 +1012,14 @@ def _process_index_day(
         return 0, 0
 
     fetched, failed, _, added = _fetch_filings(paths, cik_to_ticker, bucket)
-    if failed and fetched == 0:
-        # Nothing at all came back: the day is not done, whatever the index said.
+    if failed:
+        # The day is not done until every one of its filings is in. Leaving
+        # it unrecorded costs almost nothing — the successful filings are in
+        # seen_filings and will be skipped — but recording it would put the
+        # failed ones beyond the 7-day daily window, where nothing looks.
+        logger.info(
+            "%s: %s of %s filings failed — day left for retry", day, failed, fetched + failed
+        )
         return None
     return fetched, added
 
@@ -1032,13 +1056,15 @@ def fill_history_gap(
 
     today = datetime.now(timezone.utc).date()
 
-    newest_quarter = _newest_published_quarter(today)
+    # The gap starts after the newest bulk quarter *this store loaded*. Only
+    # when nothing has ever loaded — which should mean the bulk backfill is
+    # about to run — is SEC's own catalogue consulted instead.
+    newest_quarter = store.get_meta("bulk_through_quarter") or _newest_published_quarter(today)
     if newest_quarter is None:
-        logger.warning("No published bulk quarter found — skipping the gap fill")
+        logger.warning("No bulk quarter loaded or published — skipping the gap fill")
         return {"days_processed": 0, "rows_added": 0, "error": "no bulk quarter"}
 
-    # The gap starts on the first day of the quarter after the newest one that
-    # is actually published.
+    # The gap starts on the first day of the following quarter.
     year, quarter = int(newest_quarter[:4]), int(newest_quarter[-1])
     gap_start = (
         date(year + 1, 1, 1) if quarter == 4 else date(year, quarter * 3 + 1, 1)

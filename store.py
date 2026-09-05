@@ -131,10 +131,33 @@ def init_db(path: Path | None = None) -> None:
                 filings_found INTEGER NOT NULL DEFAULT 0,
                 rows_added    INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Small facts about the store itself. Today: which quarterly bulk
+            -- datasets actually loaded, so the gap fill starts from what the
+            -- store holds rather than from what SEC has published.
+            CREATE TABLE IF NOT EXISTS meta (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
             """
         )
 
         _migrate(conn)
+
+
+def set_meta(key: str, value: str, path: Path | None = None) -> None:
+    with connect(path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, _now()),
+        )
+
+
+def get_meta(key: str, path: Path | None = None) -> Optional[str]:
+    with connect(path) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
 
 
 # Columns added after the first version shipped. ``CREATE TABLE IF NOT

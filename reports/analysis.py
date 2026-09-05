@@ -185,6 +185,14 @@ def _is_open_market_purchase(frame: pd.DataFrame) -> pd.Series:
 
     by_text = frame["trade_type"].isin(BUY_TYPES) & keyword_hit
 
+    # A P-coded line whose direction flag says "disposed" is a filing error,
+    # but it must not become a purchase in the totals. The store signs value
+    # by that flag, so a genuine purchase is always positive.
+    if "value" in frame.columns:
+        acquired = pd.to_numeric(frame["value"], errors="coerce").fillna(0) > 0
+        by_code = by_code & acquired
+        by_text = by_text & acquired
+
     # Materialised as a plain bool. ``code == "P"`` on a nullable string
     # column yields pd.NA where the code is missing, and under three-valued
     # logic that NA survives the ``|`` — so the mask came back nullable and
@@ -804,6 +812,8 @@ def fmt_money(value: Any, precise: bool = False) -> str:
     try:
         amount = float(value)
     except (TypeError, ValueError):
+        return "—"
+    if pd.isna(amount):
         return "—"
 
     sign = "-" if amount < 0 else ""

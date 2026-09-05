@@ -126,22 +126,30 @@ def fetch_price_history(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _cache_key(ticker: str, start: str, through: str) -> str:
+def _cache_key(ticker: str, start: str, through: str, last_close: float) -> str:
     """Identity of a rendered figure.
 
-    ``through`` is the last date in the price data, so a chart is reused only
-    while both its window and its data are unchanged. A new trading day
-    changes ``through`` and the figure is redrawn.
+    ``through`` is the last date in the price data and ``last_close`` the
+    ticker's final value on it, so a chart is reused only while its window
+    and its data are unchanged. The value matters as well as the date: a
+    rebuild during the trading session sees the same last date with a
+    different last bar, and the KPI tiles beside the chart are recomputed
+    from that bar — a date-only key would leave the figure contradicting them.
     """
     safe = ticker.replace("^", "_").replace("/", "-")
-    return f"{safe}__{start}__{through}.png"
+    return f"{safe}__{start}__{through}__{int(round(last_close * 100))}.png"
 
 
-def _render_one(job: Dict) -> Tuple[str, Optional[str]]:
+def _render_one(job: Dict) -> Tuple[str, Optional[str], Optional[str]]:
     """Render one performance chart. Runs in a worker process.
 
-    Takes plain data rather than objects because everything crossing a
-    process boundary has to pickle, and a matplotlib figure does not.
+    Returns ``(ticker, path_or_None, error_or_None)``. Takes plain data
+    rather than objects because everything crossing a process boundary has
+    to pickle, and a matplotlib figure does not. It also does not log: on
+    Linux the pool forks, and a forked child inherits the parent's logging
+    handlers and their locks in whatever state another thread left them —
+    a handler lock held at fork time deadlocks the child. Errors are
+    returned and logged by the parent.
     """
     ticker = job["ticker"]
     fig = None
@@ -205,11 +213,10 @@ def _render_one(job: Dict) -> Tuple[str, Optional[str]]:
         fig.tight_layout(pad=0.4)
         path = job["path"]
         fig.savefig(path, dpi=170, facecolor="white", bbox_inches="tight", pad_inches=0.04)
-        return ticker, path
+        return ticker, path, None
 
     except Exception as exc:  # noqa: BLE001 — one bad chart must not fail the report
-        logger.warning("Chart render failed for %s: %s", ticker, exc)
-        return ticker, None
+        return ticker, None, f"{type(exc).__name__}: {exc}"
 
     finally:
         # Closing in a finally, not after savefig: any exception raised
@@ -251,13 +258,13 @@ def build_charts(
         if ticker not in prices.columns:
             continue
 
-        path = cache_dir / _cache_key(ticker, start, through)
-        if path.exists() and path.stat().st_size > 0:
-            results[key] = str(path)
-            continue
-
         window = prices[ticker].loc[pd.Timestamp(start):].dropna()
         if len(window) < 2:
+            continue
+
+        path = cache_dir / _cache_key(ticker, start, through, float(window.iloc[-1]))
+        if path.exists() and path.stat().st_size > 0:
+            results[key] = str(path)
             continue
 
         bench_window = (
@@ -290,13 +297,18 @@ def build_charts(
 
     logger.info("Rendering %s chart(s) across %s workers", len(jobs), CHART_WORKERS)
 
+    def _accept(job: Dict, outcome: Tuple[str, Optional[str], Optional[str]]) -> None:
+        ticker, path, error = outcome
+        if path:
+            results[job["key"]] = path
+        elif error:
+            logger.warning("Chart render failed for %s: %s", ticker, error)
+
     # A single figure is not worth a process pool's startup cost, and on a
     # constrained container the sequential path is the safer default.
     if len(jobs) == 1 or CHART_WORKERS <= 1:
         for job in jobs:
-            _, path = _render_one(job)
-            if path:
-                results[job["key"]] = path
+            _accept(job, _render_one(job))
         return results
 
     try:
@@ -305,12 +317,9 @@ def build_charts(
             for future in as_completed(futures):
                 job = futures[future]
                 try:
-                    _, path = future.result()
+                    _accept(job, future.result())
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Chart worker failed for %s: %s", job["ticker"], exc)
-                    continue
-                if path:
-                    results[job["key"]] = path
     except Exception:
         # Process pools can be unavailable in constrained sandboxes.
         logger.warning("Parallel chart rendering unavailable — falling back to serial")
@@ -326,9 +335,7 @@ def build_charts(
     if missing:
         logger.info("Rendering %s chart(s) serially", len(missing))
         for job in missing:
-            _, path = _render_one(job)
-            if path:
-                results[job["key"]] = path
+            _accept(job, _render_one(job))
 
     return results
 
